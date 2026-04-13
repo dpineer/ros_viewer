@@ -1,0 +1,489 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'services/logger_service.dart';
+import 'services/robot_provider.dart';
+import 'services/storage_service.dart';
+import 'app_navigator.dart';
+
+void main() async {
+  // 初始化StorageService
+  final storageService = StorageService();
+  await storageService.init();
+  
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => LoggerService()),
+        ChangeNotifierProvider(create: (_) => storageService),
+        ChangeNotifierProxyProvider<StorageService, RobotStateProvider>(
+          create: (context) => RobotStateProvider(
+            context.read<LoggerService>(),
+            context.read<StorageService>(),
+          ),
+          update: (context, storage, previous) => previous ?? RobotStateProvider(
+            context.read<LoggerService>(),
+            storage,
+          ),
+        ),
+      ],
+      child: const MaterialApp(
+        title: 'ROS Controller',
+        debugShowCheckedModeBanner: false,
+        home: AppNavigator(), // 启动层变更为导航器
+      ),
+    ),
+  );
+}
+
+
+import 'package:flutter/material.dart';
+import 'main_dashboard.dart';
+import 'ssh_terminal_view.dart';
+import 'settings_view.dart';
+
+class AppNavigator extends StatefulWidget {
+  const AppNavigator({Key? key}) : super(key: key);
+
+  @override
+  State<AppNavigator> createState() => _AppNavigatorState();
+}
+
+class _AppNavigatorState extends State<AppNavigator> {
+  int _currentIndex = 2; // 默认启动时显示设置界面以便确认IP
+
+  final List<Widget> _pages = [
+    const MainDashboard(),
+    const SshTerminalView(),
+    const SettingsView(),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: _pages,
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        onTap: (index) => setState(() => _currentIndex = index),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.dashboard), label: 'Control'),
+          BottomNavigationBarItem(icon: Icon(Icons.terminal), label: 'SSH Term'),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+}
+
+
+
+import 'package:flutter/material.dart';
+
+class LoggerService extends ChangeNotifier {
+  final List<String> _logs = [];
+  List<String> get logs => _logs;
+
+  void info(String message) {
+    _logs.add('[INFO] ${DateTime.now().toString().substring(11, 19)} - $message');
+    notifyListeners();
+  }
+
+  void error(String message) {
+    _logs.add('[ERROR] ${DateTime.now().toString().substring(11, 19)} - $message');
+    notifyListeners();
+  }
+
+  void clear() {
+    _logs.clear();
+    notifyListeners();
+  }
+}
+
+import 'dart:convert';
+import 'package:dartssh2/dartssh2.dart';
+
+class SshJoystickService {
+  SSHSession? _shell;
+
+  // 初始化并向 SSH 注入挂载本地 ROS 的 Python 脚本
+  Future<void> initSshTeleop(SSHClient client) async {
+    _shell = await client.shell();
+    
+    // 注入的 Python 脚本：从 stdin 读取 "线速度,角速度\n" 并发布至 /cmd_vel
+    const pythonScript = """
+import rospy, sys
+from geometry_msgs.msg import Twist
+rospy.init_node('flutter_ssh_teleop', disable_signals=True)
+pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+for line in iter(sys.stdin.readline, ''):
+    try:
+        v, w = map(float, line.strip().split(','))
+        t = Twist()
+        t.linear.x = v
+        t.angular.z = w
+        pub.publish(t)
+    except Exception:
+        pass
+""";
+    
+    // 激活 ROS 环境变量并执行注入
+    final cmd = "source /opt/ros/kinetic/setup.bash && source /home/xtark/ros_ws/devel/setup.bash && python -c \"$pythonScript\"\n";
+    _shell!.write(utf8.encode(cmd));
+  }
+
+  // 高频下发控制指令 (由摇杆组件调用)
+  void sendVelocity(double linear, double angular) {
+    if (_shell != null) {
+      // 通过 SSH Stdin 管道流式传输数据
+      _shell!.write(utf8.encode("$linear,$angular\n"));
+    }
+  }
+
+  void dispose() {
+    _shell?.close();
+  }
+}
+
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class StorageService extends ChangeNotifier {
+  static const String _keyIp = 'robot_ip';
+  static const String _keySshUser = 'ssh_user';
+  static const String _keySshPass = 'ssh_pass';
+
+  late SharedPreferences _prefs;
+
+  // 初始化服务
+  Future<void> init() async {
+    _prefs = await SharedPreferences.getInstance();
+    notifyListeners();
+  }
+
+  // IP地址存取
+  Future<void> saveRobotIp(String ip) async {
+    await _prefs.setString(_keyIp, ip);
+    notifyListeners();
+  }
+  
+  String? getRobotIp() => _prefs.getString(_keyIp);
+
+  // SSH凭证存取 (明文存储示例，生产环境建议接入flutter_secure_storage)
+  Future<void> saveSshCredentials(String user, String pass) async {
+    await _prefs.setString(_keySshUser, user);
+    await _prefs.setString(_keySshPass, pass);
+    notifyListeners();
+  }
+  
+  Map<String, String>? getSshCredentials() {
+    final user = _prefs.getString(_keySshUser);
+    final pass = _prefs.getString(_keySshPass);
+    if (user != null && pass != null) {
+      return {'user': user, 'pass': pass};
+    }
+    return null;
+  }
+}
+
+
+import 'dart:convert';
+import 'package:dartssh2/dartssh2.dart';
+import 'package:xterm/xterm.dart';
+
+class SshSessionManager {
+  final SSHClient client;
+  final SSHSession session;
+  final Terminal terminal;
+
+  SshSessionManager(this.client, this.session) 
+      // 开启5000行历史记录缓冲，防止长时间运行导致内存溢出
+      : terminal = Terminal(maxLines: 5000) {
+    
+    // 监听远程主机的标准输出流，解码并写入到本地终端引擎
+    session.stdout.listen((data) {
+      terminal.write(utf8.decode(data, allowMalformed: true));
+    });
+    
+    // 监听错误输出流
+    session.stderr.listen((data) {
+      terminal.write(utf8.decode(data, allowMalformed: true));
+    });
+
+    // 监听本地终端引擎的键盘输入事件，发送回远程主机
+    terminal.onOutput = (output) {
+      session.write(utf8.encode(output));
+    };
+  }
+
+  // 供UI层快捷按钮与输入框调用的指令注入接口
+  void writeCommand(String command) {
+    // 模拟回车键以触发Shell指令执行
+    session.write(utf8.encode('$command\n'));
+  }
+
+  void close() {
+    session.close();
+  }
+}
+
+class SshService {
+  SSHClient? _client;
+  final List<SshSessionManager> activeSessions = [];
+  bool get isConnected => _client != null && !_client!.isClosed;
+  SSHClient? get client => _client;
+
+  Future<bool> connect(String host, String username, String password) async {
+    try {
+      final socket = await SSHSocket.connect(host, 22, timeout: const Duration(seconds: 5));
+      _client = SSHClient(socket, username: username, onPasswordRequest: () => password);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  Future<SshSessionManager> createShell() async {
+    if (!isConnected) throw Exception('SSH_DISCONNECTED');
+    // 创建包含伪终端(PTY)的Shell会话，确保远程Bash输出ANSI高亮
+    final session = await _client!.shell();
+    final manager = SshSessionManager(_client!, session);
+    activeSessions.add(manager);
+    return manager;
+  }
+
+  void disconnect() {
+    for (var session in activeSessions) {
+      session.close();
+    }
+    activeSessions.clear();
+    _client?.close();
+    _client = null;
+  }
+}
+
+import 'package:flutter/material.dart';
+import 'package:flutter_mjpeg/flutter_mjpeg.dart';
+
+class CameraView extends StatelessWidget {
+  final String robotIp;
+  final int port;
+  final String topic;
+
+  const CameraView({
+    Key? key,
+    required this.robotIp,
+    this.port = 8080,
+    this.topic = '/usb_cam/image_raw',
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final streamUrl = 'http://$robotIp:$port/stream?topic=$topic';
+    
+    return Container(
+      color: Colors.black,
+      child: Mjpeg(
+        isLive: true,
+        stream: streamUrl,
+        error: (context, error, stack) => const Center(
+          child: Text('CAMERA_STREAM_TIMEOUT', style: TextStyle(color: Colors.red)),
+        ),
+        loading: (context) => const Center(child: CircularProgressIndicator()),
+      ),
+    );
+  }
+}
+
+import 'dart:math';
+import 'package:flutter/material.dart';
+
+class LidarMapView extends StatelessWidget {
+  final Map<String, dynamic>? scanData;
+
+  const LidarMapView({Key? key, this.scanData}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.grey[900],
+      child: Center(
+        child: scanData == null
+            ? const Text(
+                '等待雷达数据...',
+                style: TextStyle(color: Colors.white70),
+              )
+            : CustomPaint(
+                size: const Size(300, 300),
+                painter: _LidarPainter(scanData!),
+              ),
+      ),
+    );
+  }
+}
+
+class _LidarPainter extends CustomPainter {
+  final Map<String, dynamic> scanData;
+
+  _LidarPainter(this.scanData);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 10;
+
+    // 绘制背景网格
+    final gridPaint = Paint()
+      ..color = Colors.grey[800]!
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+
+    // 绘制同心圆
+    for (int i = 1; i <= 5; i++) {
+      canvas.drawCircle(center, radius * i / 5, gridPaint);
+    }
+
+    // 绘制角度线
+    for (int angle = 0; angle < 360; angle += 30) {
+      final radians = angle * pi / 180;
+      final end = Offset(
+        center.dx + radius * cos(radians),
+        center.dy + radius * sin(radians),
+      );
+      canvas.drawLine(center, end, gridPaint);
+    }
+
+    // 绘制雷达点
+    if (scanData.containsKey('ranges')) {
+      final ranges = List<double>.from(scanData['ranges'] as List);
+      final angleMin = scanData['angle_min'] as double? ?? 0;
+      final angleIncrement = scanData['angle_increment'] as double? ?? 0.0174533;
+
+      final pointPaint = Paint()
+        ..color = Colors.greenAccent
+        ..style = PaintingStyle.fill;
+
+      for (int i = 0; i < ranges.length; i++) {
+        final range = ranges[i];
+        if (range.isFinite && range > 0) {
+          final angle = angleMin + i * angleIncrement;
+          final pointRadius = (range / 10.0).clamp(0.0, radius); // 假设最大范围10米
+          final point = Offset(
+            center.dx + pointRadius * cos(angle),
+            center.dy + pointRadius * sin(angle),
+          );
+          canvas.drawCircle(point, 2, pointPaint);
+        }
+      }
+    }
+
+    // 绘制中心点
+    final centerPaint = Paint()
+      ..color = Colors.red
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(center, 4, centerPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+
+import 'dart:math';
+import 'package:flutter/material.dart';
+
+class NativeJoystickView extends StatefulWidget {
+  final Function(double linear, double angular) onJoystickUpdate;
+  final double maxLinearSpeed;
+  final double maxAngularSpeed;
+  final double radius;
+
+  const NativeJoystickView({
+    Key? key,
+    required this.onJoystickUpdate,
+    this.maxLinearSpeed = 0.5,
+    this.maxAngularSpeed = 1.0,
+    this.radius = 80.0,
+  }) : super(key: key);
+
+  @override
+  State<NativeJoystickView> createState() => _NativeJoystickViewState();
+}
+
+class _NativeJoystickViewState extends State<NativeJoystickView> {
+  Offset _currentPos = Offset.zero;
+
+  void _updatePosition(Offset localPosition) {
+    // 将坐标原点移至摇杆中心
+    final center = Offset(widget.radius, widget.radius);
+    final delta = localPosition - center;
+    
+    // 计算极坐标参数
+    double distance = delta.distance;
+    double angle = delta.direction;
+
+    // 限制摇杆范围在半径内
+    if (distance > widget.radius) {
+      distance = widget.radius;
+    }
+
+    // 计算实际位置与归一化向量
+    setState(() {
+      _currentPos = Offset(distance * cos(angle), distance * sin(angle));
+    });
+
+    // 映射至ROS机体坐标系:
+    // UI Y轴负向 = 机体前进 (X线速度)
+    // UI X轴负向 = 机体左转 (Z角速度)
+    final normalizedX = _currentPos.dx / widget.radius;
+    final normalizedY = _currentPos.dy / widget.radius;
+    
+    final linearX = -normalizedY * widget.maxLinearSpeed;
+    final angularZ = -normalizedX * widget.maxAngularSpeed;
+    
+    widget.onJoystickUpdate(linearX, angularZ);
+  }
+
+  void _resetPosition() {
+    setState(() {
+      _currentPos = Offset.zero;
+    });
+    widget.onJoystickUpdate(0.0, 0.0); // 松手归零停止运动
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = widget.radius * 2;
+    
+    return GestureDetector(
+      onPanStart: (details) => _updatePosition(details.localPosition),
+      onPanUpdate: (details) => _updatePosition(details.localPosition),
+      onPanEnd: (_) => _resetPosition(),
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.grey.withOpacity(0.3),
+        ),
+        child: Center(
+          child: Transform.translate(
+            offset: _currentPos,
+            child: Container(
+              width: widget.radius,
+              height: widget.radius,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.blueAccent.withOpacity(0.8),
+                boxShadow: const[
+                  BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(2, 2))
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
