@@ -1,3 +1,152 @@
+前端渲染层：恢复并新增视图组件
+
+操作：首先，完全撤销上一轮对 camera_view.dart 的修改，保持其原样（即指向 8080 端口和 ROS topic）。
+
+操作：新建文件 lib/components/thermal_camera_view.dart，专门用于渲染 C++ 后端的热成像流。
+code Dart
+
+// 文件: lib/components/thermal_camera_view.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_mjpeg/flutter_mjpeg.dart';
+
+class ThermalCameraView extends StatelessWidget {
+  final String robotIp;
+  final int port;
+
+  const ThermalCameraView({
+    Key? key,
+    required this.robotIp,
+    this.port = 8081, // C++ 后端独立视频流端口
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final streamUrl = 'http://$robotIp:$port/';
+    
+    return Container(
+      color: Colors.black,
+      child: Mjpeg(
+        isLive: true,
+        stream: streamUrl,
+        error: (context, error, stack) => const Center(
+          child: Text('THERMAL_STREAM_TIMEOUT\n未检测到热成像流 (8081端口)', 
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.red)),
+        ),
+        loading: (context) => const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children:[
+              CircularProgressIndicator(color: Colors.deepOrange),
+              SizedBox(height: 16),
+              Text('正在连接热成像...', style: TextStyle(color: Colors.white54)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+2. 前端状态层：修改 robot_provider.dart
+
+引入热成像专属的控制参数和发送逻辑。请在文件中加入 dart:io。
+code Dart
+
+// 修改文件: lib/services/robot_provider.dart
+import 'dart:async';
+import 'dart:io'; // 必须引入用于 HttpClient 请求
+import 'package:flutter/material.dart';
+import 'ros_service.dart';
+import 'ssh_service.dart';
+import 'ssh_direct_bridge.dart';
+import 'logger_service.dart';
+import 'storage_service.dart';
+
+class RobotStateProvider extends ChangeNotifier {
+  // ... (保留原有所有属性，如 targetIp, sshUser 等) ...
+  final RosService rosService = RosService();
+  final SshService sshService = SshService();
+  final SshDirectBridge sshBridge = SshDirectBridge();
+  final LoggerService logger;
+  final StorageService storageService;
+
+  bool isSshConnected = false;
+  bool isRosConnected = false;
+  
+  String targetIp = '192.168.1.100';
+  String sshUser = 'xtark';
+  String sshPass = 'xtark';
+  
+  Map<String, dynamic>? latestScanData;
+  Map<String, dynamic>? latestMapData;
+
+  Timer? _watchdogTimer;
+  double _currentLinear = 0.0;
+  double _currentAngular = 0.0;
+
+  // ================= 增量：红外热成像专属算法控制状态 =================
+  int thermalBrightness = 128;
+  int thermalContrast = 32;
+  int thermalSaturation = 64;
+  int thermalGamma = 120;
+
+  Timer? _thermalApiDebouncer; // HTTP 请求防抖动定时器
+
+  RobotStateProvider(this.logger, this.storageService) {
+    _loadStoredIp();
+    _loadStoredSshCredentials();
+  }
+
+  // ... (保留原有的 _loadStoredIp, _loadStoredSshCredentials, connectSsh, connectRos, updateJoystick 等方法) ...
+
+  // ================= 增量：红外热成像算法控制方法 =================
+  void updateThermalParams({int? b, int? c, int? s, int? g}) {
+    if (b != null) thermalBrightness = b;
+    if (c != null) thermalContrast = c;
+    if (s != null) thermalSaturation = s;
+    if (g != null) thermalGamma = g;
+    notifyListeners(); // 触发 UI 更新滑动条
+
+    // 50 毫秒防抖，避免滑动时瞬间打爆 C++ 后端 8082 端口
+    _thermalApiDebouncer?.cancel();
+    _thermalApiDebouncer = Timer(const Duration(milliseconds: 50), () {
+      _sendThermalConfig();
+    });
+  }
+
+  Future<void> _sendThermalConfig() async {
+    HttpClient? client;
+    try {
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      // 调用您 C++ 后端的 8082 端口 API
+      final url = Uri.parse(
+          'http://$targetIp:8082/set?b=$thermalBrightness&c=$thermalContrast&s=$thermalSaturation&g=$thermalGamma');
+      final request = await client.getUrl(url);
+      final response = await request.close();
+      await response.drain(); // 必须排空流以释放套接字资源
+    } catch (e) {
+      logger.error('Thermal Tuning API Error: $e');
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _thermalApiDebouncer?.cancel();
+    _watchdogTimer?.cancel();
+    sshBridge.dispose();
+    super.dispose();
+  }
+}
+
+3. 前端交互层：修改 main_dashboard.dart
+
+引入双摄切换逻辑：添加摄像头通道切换功能，以及热成像参数调优滑块。
+code Dart
+
+// 修改文件: lib/main_dashboard.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -100,54 +249,6 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // 新增：构建调参底部面板
-  void _showCameraSettings(BuildContext context, RobotStateProvider provider) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children:[
-                  const Text('Image Algorithm Tuning', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  const Divider(color: Colors.white24),
-                  // B: 0~255 (默认 128)
-                  _buildSlider('Brightness', provider.cameraBrightness.toDouble(), 0, 255, (v) {
-                    provider.updateCameraParams(b: v.toInt());
-                    setModalState(() {});
-                  }),
-                  // C: 0~100 (默认 32)
-                  _buildSlider('Contrast', provider.cameraContrast.toDouble(), 0, 100, (v) {
-                    provider.updateCameraParams(c: v.toInt());
-                    setModalState(() {});
-                  }),
-                  // S: 0~128 (默认 64)
-                  _buildSlider('Saturation', provider.cameraSaturation.toDouble(), 0, 128, (v) {
-                    provider.updateCameraParams(s: v.toInt());
-                    setModalState(() {});
-                  }),
-                  // G: 10~240 (默认 120，防零除)
-                  _buildSlider('Gamma', provider.cameraGamma.toDouble(), 10, 240, (v) {
-                    provider.updateCameraParams(g: v.toInt());
-                    setModalState(() {});
-                  }),
-                ],
-              ),
-            );
-          }
-        );
-      }
-    );
-  }
-
   Widget _buildSlider(String label, double value, double min, double max, Function(double) onChanged) {
     return Row(
       children:[
@@ -157,12 +258,12 @@ class _MainDashboardState extends State<MainDashboard> {
             value: value,
             min: min,
             max: max,
-            activeColor: Colors.blueAccent,
+            activeColor: Colors.deepOrangeAccent, // 热成像风格使用橘红色
             inactiveColor: Colors.white24,
             onChanged: onChanged,
           ),
         ),
-        SizedBox(width: 32, child: Text(value.toInt().toString(), style: const TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold))),
+        SizedBox(width: 32, child: Text(value.toInt().toString(), style: const TextStyle(color: Colors.deepOrangeAccent, fontWeight: FontWeight.bold))),
       ],
     );
   }
@@ -201,10 +302,9 @@ class _MainDashboardState extends State<MainDashboard> {
     final smallWidget = _primaryView == ActiveView.map ? activeCameraWidget : mapWidget;
 
     return Scaffold(
-      // 隐藏原生AppBar，实现沉浸式全屏体验
       body: Stack(
         children:[
-          // 1. 核心图层 Z=0：大屏沉浸显示
+          // 核心图层 Z=0：大屏沉浸显示
           Positioned.fill(
             child: largeWidget,
           ),
@@ -286,23 +386,7 @@ class _MainDashboardState extends State<MainDashboard> {
               ),
             ),
 
-          // 交互图层 Z=2.4：可见光相机参数调节按钮 (仅在可见光模式下可见)
-          if (_currentCameraChannel == CameraChannel.rgb)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 16,
-              right: 128,
-              child: Material(
-                color: Colors.black54,
-                shape: const CircleBorder(),
-                child: IconButton(
-                  icon: const Icon(Icons.tune, color: Colors.white),
-                  onPressed: () => _showCameraSettings(context, provider),
-                  tooltip: 'Camera Tuning',
-                ),
-              ),
-            ),
-
-          // 4. 交互图层 Z=3：虚拟摇杆 (置于底部中心偏下处)
+          // 交互图层 Z=3：虚拟摇杆
           Positioned(
             bottom: 32,
             left: 0,
@@ -313,10 +397,10 @@ class _MainDashboardState extends State<MainDashboard> {
                 child: Padding(
                   padding: _isLandscape ? const EdgeInsets.only(right: 48.0) : EdgeInsets.zero,
                   child: Opacity(
-                    opacity: _primaryView == ActiveView.camera ? 0.6 : 0.85, // 在摄像头上叠加时透明度更高
+                    opacity: _primaryView == ActiveView.camera ? 0.6 : 0.85,
                     child: NativeJoystickView(
                       onJoystickUpdate: provider.updateJoystick,
-                      radius: _isLandscape ? 70.0 : 80.0, // 横屏时摇杆稍微变小
+                      radius: _isLandscape ? 70.0 : 80.0,
                     ),
                   ),
                 ),

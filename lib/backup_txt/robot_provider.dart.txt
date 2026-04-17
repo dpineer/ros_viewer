@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io'; // 新增引入
 import 'package:flutter/material.dart';
 import 'ros_service.dart';
 import 'ssh_service.dart';
@@ -28,22 +27,6 @@ class RobotStateProvider extends ChangeNotifier {
   Timer? _watchdogTimer;
   double _currentLinear = 0.0;
   double _currentAngular = 0.0;
-
-  // ================= 可见光相机算法控制状态 =================
-  int cameraBrightness = 128;
-  int cameraContrast = 32;
-  int cameraSaturation = 64;
-  int cameraGamma = 120;
-
-  Timer? _cameraApiDebouncer; // HTTP 请求防抖动定时器
-
-  // ================= 红外热成像专属算法控制状态 =================
-  int thermalBrightness = 128;
-  int thermalContrast = 32;
-  int thermalSaturation = 64;
-  int thermalGamma = 120;
-
-  Timer? _thermalApiDebouncer; // HTTP 请求防抖动定时器
 
   RobotStateProvider(this.logger, this.storageService) {
     // 从持久化存储加载IP地址
@@ -153,74 +136,8 @@ class RobotStateProvider extends ChangeNotifier {
     sshBridge.sendVelocity(linear, angular);
   }
 
-  // ================= 图像算法控制方法 =================
-  void updateCameraParams({int? b, int? c, int? s, int? g}) {
-    if (b != null) cameraBrightness = b;
-    if (c != null) cameraContrast = c;
-    if (s != null) cameraSaturation = s;
-    if (g != null) cameraGamma = g;
-    notifyListeners(); // 触发 UI 更新滑动条数值
-
-    // 50 毫秒防抖，避免滑动时瞬间打爆后端 8082 端口
-    _cameraApiDebouncer?.cancel();
-    _cameraApiDebouncer = Timer(const Duration(milliseconds: 50), () {
-      _sendCameraConfig();
-    });
-  }
-
-  Future<void> _sendCameraConfig() async {
-    HttpClient? client;
-    try {
-      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
-      final url = Uri.parse(
-          'http://$targetIp:8082/set?b=$cameraBrightness&c=$cameraContrast&s=$cameraSaturation&g=$cameraGamma');
-      final request = await client.getUrl(url);
-      final response = await request.close();
-      await response.drain(); // 必须排空流以释放套接字资源
-    } catch (e) {
-      // 忽略短暂的网络波动或打印日志
-      logger.error('Camera Tuning API Error: $e');
-    } finally {
-      client?.close(force: true);
-    }
-  }
-
-  // ================= 红外热成像算法控制方法 =================
-  void updateThermalParams({int? b, int? c, int? s, int? g}) {
-    if (b != null) thermalBrightness = b;
-    if (c != null) thermalContrast = c;
-    if (s != null) thermalSaturation = s;
-    if (g != null) thermalGamma = g;
-    notifyListeners(); // 触发 UI 更新滑动条
-
-    // 50 毫秒防抖，避免滑动时瞬间打爆 C++ 后端 8082 端口
-    _thermalApiDebouncer?.cancel();
-    _thermalApiDebouncer = Timer(const Duration(milliseconds: 50), () {
-      _sendThermalConfig();
-    });
-  }
-
-  Future<void> _sendThermalConfig() async {
-    HttpClient? client;
-    try {
-      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
-      // 调用您 C++ 后端的 8082 端口 API
-      final url = Uri.parse(
-          'http://$targetIp:8082/set?b=$thermalBrightness&c=$thermalContrast&s=$thermalSaturation&g=$thermalGamma');
-      final request = await client.getUrl(url);
-      final response = await request.close();
-      await response.drain(); // 必须排空流以释放套接字资源
-    } catch (e) {
-      logger.error('Thermal Tuning API Error: $e');
-    } finally {
-      client?.close(force: true);
-    }
-  }
-
   @override
   void dispose() {
-    _thermalApiDebouncer?.cancel();
-    _cameraApiDebouncer?.cancel();
     _watchdogTimer?.cancel();
     sshBridge.dispose();
     super.dispose();
