@@ -61,6 +61,21 @@ class RosService {
     });
   }
 
+  void publishGoal(double x, double y) {
+    if (_channel == null) return;
+    _sendWsMessage({
+      'op': 'publish',
+      'topic': topicGoal,
+      'msg': {
+        'header': {'frame_id': 'map'},
+        'pose': {
+          'position': {'x': x, 'y': y, 'z': 0.0},
+          'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0} // 忽略方向，由导航包自动接管
+        }
+      }
+    });
+  }
+
   void _sendWsMessage(Map<String, dynamic> payload) {
     _channel?.sink.add(jsonEncode(payload));
   }

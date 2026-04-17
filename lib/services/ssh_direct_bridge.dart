@@ -64,11 +64,13 @@ def scan_cb(msg):
 
 def map_cb(msg):
     global latest_map_payload
-    rx, ry = 0.0, 0.0
+    rx, ry, rth = 0.0, 0.0, 0.0
     if tf_listener:
         try:
             (trans, rot) = tf_listener.lookupTransform('/map', '/base_footprint', rospy.Time(0))
             rx, ry = trans[0], trans[1]
+            # [新增] 提取航向角(Yaw)
+            _, _, rth = tf.transformations.euler_from_quaternion(rot)
         except: pass
 
     info = msg.info
@@ -86,6 +88,7 @@ def map_cb(msg):
         'oy': info.origin.position.y,
         'rx': rx,
         'ry': ry,
+        'rth': rth, # [新增] 推送给前端
         'data': b64
     }
     latest_map_payload = json.dumps(payload)

@@ -81,6 +81,43 @@ class SettingsView extends StatelessWidget {
               ),
             ),
           ),
+
+          // ================= 新增：一键环境部署控制台 =================
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+            child: Card(
+              color: Colors.blueGrey[50],
+              child: Column(
+                children: [
+                  const ListTile(
+                    leading: Icon(Icons.rocket_launch, color: Colors.blue),
+                    title: Text('Environment Deployment Console', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                  const Divider(height: 1),
+                  ListTile(
+                    title: const Text('1. 配置下位机环境 (Inject to Robot)'),
+                    subtitle: const Text('自动写入 lidar_follower.py 并拉取 explore_lite'),
+                    trailing: ElevatedButton.icon(
+                      icon: const Icon(Icons.install_desktop, size: 18),
+                      label: const Text('一键注入'),
+                      onPressed: provider.isSshConnected ? () => provider.injectRobotEnvironment() : null,
+                    ),
+                  ),
+                  ListTile(
+                    title: const Text('2. 启动上位机 AI 引擎 (Compile Host C++)'),
+                    subtitle: const Text('自动编译本地 C++ 代码并挂载 YOLO 算力'),
+                    trailing: ElevatedButton.icon(
+                      icon: const Icon(Icons.memory, size: 18),
+                      label: const Text('编译执行'),
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white),
+                      onPressed: () => provider.compileAndRunHostAI(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
           // 系统日志输出
           const Divider(),
           const Text('System Logs', style: TextStyle(fontWeight: FontWeight.bold)),

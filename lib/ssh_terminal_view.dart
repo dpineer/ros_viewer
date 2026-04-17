@@ -16,10 +16,12 @@ class _SshTerminalViewState extends State<SshTerminalView> {
   final TextEditingController _cmdController = TextEditingController();
 
   final Map<String, String> _quickCommands = {
-    '1. Core': 'source /opt/ros/kinetic/setup.bash && roscore',
-    '2. Driver': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch xtark_driver xtark_driver.launch',
-    '3. SLAM': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch xtark_nav xtark_slam.launch',
-    '4. Camera': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch xtark_driver xtark_camera.launch',
+    '1. 核心启动': 'source /opt/ros/kinetic/setup.bash && roscore',
+    '2. 驱动模块': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch xtark_driver xtark_driver.launch',
+    '3. SLAM建图': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch xtark_nav xtark_slam.launch',
+    '4. 导航模式': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch xtark_nav xtark_nav.launch',
+    '5. 自动补图': 'source /home/xtark/ros_ws/devel/setup.bash && roslaunch explore_lite explore.launch',
+    '6. 雷达跟随': 'source /home/xtark/ros_ws/devel/setup.bash && python /home/xtark/ros_ws/lidar_follower.py',
   };
 
   Future<void> _addTerminal() async {

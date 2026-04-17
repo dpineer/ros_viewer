@@ -8,16 +8,37 @@ class SlamMapView extends StatelessWidget {
   final Map<String, dynamic>? scanData;
   final Map<String, dynamic>? mapData;
   final double scale;
+  final Function(double x, double y)? onMapTap; // [新增] 点击回调
 
-  const SlamMapView({Key? key, this.scanData, this.mapData, this.scale = 30.0}) : super(key: key);
+  const SlamMapView({Key? key, this.scanData, this.mapData, this.scale = 30.0, this.onMapTap}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFF1E1E1E), // 更深的背景提升对比度
-      child: CustomPaint(
-        painter: SlamPainter(scanData, mapData, scale),
-        size: const Size(double.infinity, double.infinity),
+    return GestureDetector(
+      onTapDown: (details) {
+        if (mapData == null || onMapTap == null) return;
+        // 触控反向解算逻辑
+        final center = Offset(context.size!.width / 2, context.size!.height / 2);
+        final double rth = (mapData!['rth'] as num?)?.toDouble() ?? 0.0;
+        final double rx = (mapData!['rx'] as num).toDouble();
+        final double ry = (mapData!['ry'] as num).toDouble();
+
+        // 还原物理屏幕到相对坐标系
+        double rotY = (center.dx - details.localPosition.dx) / scale;
+        double rotX = (center.dy - details.localPosition.dy) / scale;
+
+        // 逆向旋转矩阵 + 加上小车本体坐标
+        double relX = rotX * cos(rth) - rotY * sin(rth);
+        double relY = rotX * sin(rth) + rotY * cos(rth);
+        
+        onMapTap!(rx + relX, ry + relY);
+      },
+      child: Container(
+        color: const Color(0xFF1E1E1E),
+        child: CustomPaint(
+          painter: SlamPainter(scanData, mapData, scale),
+          size: const Size(double.infinity, double.infinity),
+        ),
       ),
     );
   }
@@ -42,6 +63,7 @@ class SlamPainter extends CustomPainter {
       final double originY = (mapData!['oy'] as num).toDouble();
       final double rx = (mapData!['rx'] as num?)?.toDouble() ?? 0.0;
       final double ry = (mapData!['ry'] as num?)?.toDouble() ?? 0.0;
+      final double rth = (mapData!['rth'] as num?)?.toDouble() ?? 0.0; // [新增]
       final String b64Data = mapData!['data'];
 
       try {
@@ -68,12 +90,12 @@ class SlamPainter extends CustomPainter {
             double relX = wx - rx;
             double relY = wy - ry;
             
-            // 【关键数学修复】：统一雷达映射！
-            // ROS X(前方) 映射屏幕 -Y(上方)
-            // ROS Y(左方) 映射屏幕 -X(左方)
-            double px = center.dx - (relY * scale);
-            double py = center.dy - (relX * scale);
+            // [新增] 2D 旋转矩阵，使地图围绕小车转动
+            double rotatedX = relX * cos(-rth) - relY * sin(-rth);
+            double rotatedY = relX * sin(-rth) + relY * cos(-rth);
             
+            double px = center.dx - (rotatedY * scale);
+            double py = center.dy - (rotatedX * scale);
             obstacles.add(Offset(px, py));
           }
         }

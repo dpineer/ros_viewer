@@ -189,12 +189,13 @@ class _MainDashboardState extends State<MainDashboard> {
       scanData: provider.latestScanData,
       mapData: provider.latestMapData,
       scale: 45.0, 
+      onMapTap: (x, y) => provider.sendNavGoal(x, y), // 挂载触控事件
     );
     
     // 2. 动态路由相机视图 (判断当前处于 可见光 还是 热成像)
     final Widget activeCameraWidget = _currentCameraChannel == CameraChannel.rgb
         ? CameraView(robotIp: provider.targetIp)
-        : ThermalCameraView(robotIp: provider.targetIp);
+        : ThermalCameraView();
 
     // 主副视图装载
     final largeWidget = _primaryView == ActiveView.map ? mapWidget : activeCameraWidget;
@@ -270,7 +271,22 @@ class _MainDashboardState extends State<MainDashboard> {
             ),
           ),
 
-          // 交互图层 Z=2.3：热成像参数调节按钮 (仅在热成像模式下可见)
+          // 交互图层 Z=2.3：YOLO Toggle 按钮 (Z层级同双摄切换按钮，位置再向左错开)
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 16,
+            right: 184, 
+            child: Material(
+              color: provider.isYoloEnabled ? Colors.green : Colors.grey,
+              shape: const CircleBorder(),
+              child: IconButton(
+                icon: const Icon(Icons.psychology, color: Colors.white),
+                onPressed: provider.toggleYolo,
+                tooltip: 'YOLO 目标检测',
+              ),
+            ),
+          ),
+
+          // 交互图层 Z=2.4：热成像参数调节按钮 (仅在热成像模式下可见)
           if (_currentCameraChannel == CameraChannel.thermal)
             Positioned(
               top: MediaQuery.of(context).padding.top + 16,
@@ -286,7 +302,7 @@ class _MainDashboardState extends State<MainDashboard> {
               ),
             ),
 
-          // 交互图层 Z=2.4：可见光相机参数调节按钮 (仅在可见光模式下可见)
+          // 交互图层 Z=2.5：可见光相机参数调节按钮 (仅在可见光模式下可见)
           if (_currentCameraChannel == CameraChannel.rgb)
             Positioned(
               top: MediaQuery.of(context).padding.top + 16,

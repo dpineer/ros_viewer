@@ -1,20 +1,18 @@
-// 文件: lib/components/thermal_camera_view.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_mjpeg/flutter_mjpeg.dart';
 
 class ThermalCameraView extends StatelessWidget {
-  final String robotIp;
   final int port;
 
   const ThermalCameraView({
     Key? key,
-    required this.robotIp,
-    this.port = 8081, // C++ 后端独立视频流端口
+    this.port = 8081, 
   }) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    final streamUrl = 'http://$robotIp:$port/';
+    // 【关键修复】：拉取由上位机 C++ (本地) 输出的融合并画了 YOLO 框的流
+    final streamUrl = 'http://127.0.0.1:$port/';
     
     return Container(
       color: Colors.black,
@@ -22,7 +20,7 @@ class ThermalCameraView extends StatelessWidget {
         isLive: true,
         stream: streamUrl,
         error: (context, error, stack) => const Center(
-          child: Text('THERMAL_STREAM_TIMEOUT\n未检测到热成像流 (8081端口)', 
+          child: Text('AI/THERMAL_STREAM_TIMEOUT\n未检测到上位机 AI 引擎流\n请在 Settings 中点击[编译执行]', 
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.red)),
         ),
@@ -32,7 +30,7 @@ class ThermalCameraView extends StatelessWidget {
             children:[
               CircularProgressIndicator(color: Colors.deepOrange),
               SizedBox(height: 16),
-              Text('正在连接热成像...', style: TextStyle(color: Colors.white54)),
+              Text('正在拉取 AI 引擎数据流...', style: TextStyle(color: Colors.white54)),
             ],
           ),
         ),
